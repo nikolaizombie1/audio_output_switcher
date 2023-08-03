@@ -1,0 +1,10 @@
+[
+  {
+    "device_name": "Schiit Modi 3+",
+    "sink_name": "alsa_output.usb-Schiit_Audio_Schiit_Modi_3_-00.analog-stereo"
+  },
+  {
+    "device_name": "Monitor",
+    "sink_name": "alsa_output.pci-0000_0b_00.1.hdmi-stereo-extra2"
+  }
+]
