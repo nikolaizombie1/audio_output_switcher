@@ -70,7 +70,7 @@ fn main() {
 	    }
     } else if args.view {
 	let new_sink = &devices.into_iter().find(|d| d.sink_name == get_default_sink()).unwrap();
-	println!("{}",new_sink.device_name);
+	println!("{}",format!("|{}|",new_sink.device_name));
     }
 
     std::process::exit(exitcode::OK)
