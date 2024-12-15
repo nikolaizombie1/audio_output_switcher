@@ -9,14 +9,17 @@ use std::{path::PathBuf, process::Command};
 	.args(&["change","view"])
 ))]
 struct Args {
+    /// Change current sink to the next available one.
     #[arg(short, long, group = "func")]
     change: bool,
 
+    /// View the current sink.
     #[arg(short, long, group = "func")]
     view: bool,
 
-    #[arg(short = 'f', long, required = true, value_parser = is_jason_config)]
-    devices_file: PathBuf,
+    /// Specify a devices file to overwrite default names.
+    #[arg(short = 'f', long, value_parser = is_jason_config)]
+    devices_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -25,90 +28,121 @@ struct Device {
     sink_name: String,
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     match which::which("pactl") {
         Ok(_) => {}
         Err(e) => {
             eprintln!("{e}");
-            std::process::exit(2);
+            std::process::exit(exitcode::UNAVAILABLE);
         }
     }
     match which::which("bash") {
         Ok(_) => {}
         Err(e) => {
             eprintln!("{e}");
-            std::process::exit(2);
+            std::process::exit(exitcode::UNAVAILABLE);
         }
     }
     let current_default_sink = get_default_sink();
 
-    let mut devices = get_devices(&args.devices_file).unwrap();
-
-    let available_sinks = get_available_sinks();
-
-    for sink in &available_sinks {
-	for device in &mut devices {
-	    if sink.contains(&device.sink_name) {
-		device.sink_name = sink.clone();
-	    }
-	}
-    }
-
-    let devices = devices.into_iter().filter(|d| device_available(d,&available_sinks) ).collect::<Vec<Device>>();
-    
-    let curr_default_device = match devices
-        .clone()
-        .into_iter()
-        .find(|s| current_default_sink.contains(&s.sink_name))
-    {
-        Some(device) => device,
-        None => Device {
-            device_name: current_default_sink[0..3].to_owned(),
-            sink_name: current_default_sink,
-        },
+    let current_device = Device {
+        device_name: get_short_sink_name(&current_default_sink),
+        sink_name: current_default_sink,
     };
 
-    if args.change {
-        match curr_default_device.device_name == "Unknown Device" {
-            true => {
-		set_default_sink(&devices.clone().first().unwrap().sink_name);
+
+    let mut available_devices = get_available_devices();
+
+    if args.devices_file.is_some() {
+        let devices = get_devices(&args.devices_file.unwrap())
+            .expect("Unable to get divices from device file");
+        for device in &mut available_devices {
+            for overide_device in &devices {
+                if device.sink_name.contains(&overide_device.sink_name) {
+                    device.device_name = overide_device.device_name.clone();
+                }
             }
-            false => {
-		let pos = devices.clone().into_iter().position(|d| d == curr_default_device ).unwrap();
-		let new_sink = &devices[(pos+1)%devices.clone().len()];
-		set_default_sink(&new_sink.sink_name);
-		}
-	    }
-    } else if args.view {
-	let new_sink = &devices.into_iter().find(|d| get_default_sink().contains(&d.sink_name)).unwrap();
-	println!("{}",format!("|{}|",new_sink.device_name));
+        }
+        available_devices = available_devices
+            .iter()
+            .filter(|d| {
+                devices
+                    .iter()
+                    .map(|o| o.sink_name.clone())
+                    .any(|s| d.sink_name.contains(&s))
+            })
+            .map(|d| d.to_owned())
+            .collect::<Vec<_>>();
     }
 
-    std::process::exit(exitcode::OK)
+    if available_devices.len() == 0 {
+        eprintln!("No matching sinks found from device file.");
+        std::process::exit(exitcode::CONFIG)
+    }
+
+    let current_device = &available_devices[available_devices.iter().position(|d| d.sink_name == current_device.sink_name).unwrap()];
+
+    if args.view {
+        println!("{}", current_device.device_name);
+        std::process::exit(exitcode::OK)
+    }
+
+    if args.change {
+        let current_device_index = available_devices
+            .iter()
+            .position(|d| {
+                    d.sink_name == current_device.sink_name
+            })
+            .expect("Unexpected error");
+        let next_device = if current_device_index == available_devices.len() - 1 {
+            &available_devices[0]
+        } else {
+            &available_devices[current_device_index + 1]
+        };
+        set_default_sink(next_device);
+    }
+
+    Ok(())
 }
 
-fn set_default_sink(sink_name: &str) {
-                Command::new("bash")
-                    .arg("-c")
-                    .arg(format!(
-                        "pactl set-default-sink {}",
-                        sink_name
-                    ))
-                    .output()
-                    .expect("failed to execute pactl process");
+fn get_short_sink_name(sink: &str) -> String {
+    let sink_name = sink.split("_").collect::<Vec<_>>()[1]
+        .split(".")
+        .collect::<Vec<_>>()[1]
+        .split("-")
+        .collect::<Vec<_>>()[1]
+        .split("_")
+        .collect::<Vec<_>>()[0];
+    sink_name.to_owned()
 }
 
-fn get_available_sinks() -> Vec<String>  {
+fn set_default_sink(device: &Device) {
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!("pactl set-default-sink {}", device.sink_name))
+        .output()
+        .expect("failed to execute pactl process");
+}
+
+fn get_available_devices() -> Vec<Device> {
     String::from_utf8(
         Command::new("bash")
             .arg("-c")
             .arg("pactl list sinks short | awk '{print $2}'")
             .output()
             .expect("failed to execute pactl process")
-            .stdout
+            .stdout,
     )
-    .unwrap().trim().to_owned().split('\n').map(|s| s.to_owned()).collect::<Vec<String>>()
+    .unwrap()
+    .trim()
+    .split('\n')
+    .map(|s| s.to_owned())
+    .map(|s| Device {
+        device_name: get_short_sink_name(&s),
+        sink_name: s,
+    })
+    .collect::<Vec<Device>>()
 }
 
 fn get_default_sink() -> String {
@@ -120,7 +154,9 @@ fn get_default_sink() -> String {
             .expect("failed to execute pactl process")
             .stdout,
     )
-    .unwrap().trim().to_owned()
+    .unwrap()
+    .trim()
+    .to_owned()
 }
 
 fn is_jason_config(devices_file: &str) -> anyhow::Result<PathBuf> {
@@ -145,13 +181,4 @@ fn is_jason_config(devices_file: &str) -> anyhow::Result<PathBuf> {
 fn get_devices(devices_file: &PathBuf) -> anyhow::Result<Vec<Device>> {
     let file_contents = std::fs::read_to_string(devices_file)?;
     Ok(serde_json::from_str::<Vec<Device>>(&file_contents)?)
-}
-
-fn device_available(device: &Device,sinks: &[String]) -> bool {
-    for sink in sinks {
-	if &device.sink_name == sink {
-	    return true;
-	}
-    }
-   false 
 }
