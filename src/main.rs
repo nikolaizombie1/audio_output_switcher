@@ -1,49 +1,44 @@
-use clap::{ArgGroup, Parser};
-use serde::Deserialize;
-use std::{path::PathBuf, process::Command};
+#![deny(unused_extern_crates)]
+#![warn(missing_docs)]
 
-#[derive(Parser, Debug)]
-#[clap(group(
-    ArgGroup::new("funcs")
-	.required(true)
-	.args(&["change","view"])
-))]
-struct Args {
-    /// Change current sink to the next available one.
-    #[arg(short, long, group = "func")]
-    change: bool,
+//! # audio_output_switcher
+//! Instantly switch between audio outputs on Pipewire and Pulse Audio
+//!
+//! audio_output_switcher is a command line application used to quickly cycle through audio outputs on Pulse and Pipewire audio servers and view the current audio output.
+//!
+//! This application is intended to be an audio server agnostic way to cycle through your audio outputs, view the currently active audio output and even customize which audio
+//! outputs will be cycled.
+//!
+//! #Usage examples
+//! ```bash
+//! audio_output_switcher --view
+//! ```
+//! ```bash
+//! audio_output_switcher --change
+//! ```
 
-    /// View the current sink.
-    #[arg(short, long, group = "func")]
-    view: bool,
-
-    /// Specify a devices file to overwrite default names.
-    #[arg(short = 'f', long, value_parser = is_jason_config)]
-    devices_file: Option<PathBuf>,
-}
-
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-struct Device {
-    device_name: String,
-    sink_name: String,
-}
+use anyhow::{anyhow, Context};
+use audio_output_switcher::{
+    audio_server_utils::{
+        are_dependencies_installed, get_available_devices, get_default_sink, get_devices,
+        get_short_sink_name, set_default_sink,
+    },
+    command_line::Cli,
+    common::{Device, APP_NAME},
+};
+use clap::Parser;
+use serde::ser::Error;
+use std::{
+    fs::File,
+    io::{Read, Write},
+};
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    match which::which("pactl") {
+    match are_dependencies_installed() {
         Ok(_) => {}
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(exitcode::UNAVAILABLE);
-        }
+        Err(e) => std::process::exit(e),
     }
-    match which::which("bash") {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(exitcode::UNAVAILABLE);
-        }
-    }
+    let args = Cli::parse();
     let current_default_sink = get_default_sink();
 
     let current_device = Device {
@@ -51,37 +46,69 @@ fn main() -> anyhow::Result<()> {
         sink_name: current_default_sink,
     };
 
-
     let mut available_devices = get_available_devices();
 
-    if args.devices_file.is_some() {
-        let devices = get_devices(&args.devices_file.unwrap())
-            .expect("Unable to get divices from device file");
-        for device in &mut available_devices {
-            for overide_device in &devices {
-                if device.sink_name.contains(&overide_device.sink_name) {
-                    device.device_name = overide_device.device_name.clone();
-                }
-            }
-        }
-        available_devices = available_devices
-            .iter()
-            .filter(|d| {
-                devices
-                    .iter()
-                    .map(|o| o.sink_name.clone())
-                    .any(|s| d.sink_name.contains(&s))
-            })
-            .map(|d| d.to_owned())
-            .collect::<Vec<_>>();
+    if args.list {
+        available_devices.iter().for_each(|d| println!("Device Name: {} Sink Name: {}", d.device_name, d.sink_name));
     }
 
-    if available_devices.len() == 0 {
+    match &args.devices_file {
+        Some(f) => {
+            let devices =
+                get_devices(f).with_context(|| "Unable to get devices from device file")?;
+            for device in &mut available_devices {
+                for overide_device in &devices {
+                    if device.sink_name.contains(&overide_device.sink_name) {
+                        device.device_name = overide_device.device_name.clone();
+                    }
+                }
+            }
+            filter_unavailable_devices(&mut available_devices, &devices)
+        }
+        None => {
+            let xdg_dirs = xdg::BaseDirectories::with_prefix(APP_NAME)?;
+            let config_path = xdg_dirs.place_config_file("devices.json")?;
+            let config = File::open(&config_path);
+            let config = match config {
+                Ok(mut f) => {
+                    let mut buf = String::new();
+                    f.read_to_string(&mut buf)?;
+                    serde_json::from_str::<Vec<Device>>(&buf)
+                }
+                Err(_) => {
+                    let vec = vec![Device::default()];
+                    let json = serde_json::to_string(&vec)?;
+                    let mut c = File::create(&config_path)?;
+                    let bytes_written = c.write(json.as_bytes())?;
+                    match bytes_written == json.as_bytes().len() {
+                        true => Ok(vec),
+                        false => Err(serde_json::error::Error::custom(
+                            "unable to write device.json",
+                        )),
+                    }
+                }
+            }?;
+            match config.len() {
+                0 => return Err(anyhow!("Empty config file. Please delete.")),
+                1 => {
+                    if config[0].sink_name != String::default() {
+                        filter_unavailable_devices(&mut available_devices, &config);
+                    }
+                }
+                _ => filter_unavailable_devices(&mut available_devices, &config),
+            }
+        }
+    }
+
+    if available_devices.is_empty() {
         eprintln!("No matching sinks found from device file.");
         std::process::exit(exitcode::CONFIG)
     }
 
-    let current_device = &available_devices[available_devices.iter().position(|d| d.sink_name == current_device.sink_name).unwrap()];
+    let current_device = &available_devices[available_devices
+        .iter()
+        .position(|d| d.sink_name == current_device.sink_name)
+        .unwrap()];
 
     if args.view {
         println!("{}", current_device.device_name);
@@ -91,9 +118,7 @@ fn main() -> anyhow::Result<()> {
     if args.change {
         let current_device_index = available_devices
             .iter()
-            .position(|d| {
-                    d.sink_name == current_device.sink_name
-            })
+            .position(|d| d.sink_name == current_device.sink_name)
             .expect("Unexpected error");
         let next_device = if current_device_index == available_devices.len() - 1 {
             &available_devices[0]
@@ -101,84 +126,21 @@ fn main() -> anyhow::Result<()> {
             &available_devices[current_device_index + 1]
         };
         set_default_sink(next_device);
+        std::process::exit(exitcode::OK)
     }
 
     Ok(())
 }
 
-fn get_short_sink_name(sink: &str) -> String {
-    let sink_name = sink.split("_").collect::<Vec<_>>()[1]
-        .split(".")
-        .collect::<Vec<_>>()[1]
-        .split("-")
-        .collect::<Vec<_>>()[1]
-        .split("_")
-        .collect::<Vec<_>>()[0];
-    sink_name.to_owned()
-}
-
-fn set_default_sink(device: &Device) {
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!("pactl set-default-sink {}", device.sink_name))
-        .output()
-        .expect("failed to execute pactl process");
-}
-
-fn get_available_devices() -> Vec<Device> {
-    String::from_utf8(
-        Command::new("bash")
-            .arg("-c")
-            .arg("pactl list sinks short | awk '{print $2}'")
-            .output()
-            .expect("failed to execute pactl process")
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .split('\n')
-    .map(|s| s.to_owned())
-    .map(|s| Device {
-        device_name: get_short_sink_name(&s),
-        sink_name: s,
-    })
-    .collect::<Vec<Device>>()
-}
-
-fn get_default_sink() -> String {
-    String::from_utf8(
-        Command::new("bash")
-            .arg("-c")
-            .arg("pactl info | awk '/Default Sink: /{print $3}'")
-            .output()
-            .expect("failed to execute pactl process")
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned()
-}
-
-fn is_jason_config(devices_file: &str) -> anyhow::Result<PathBuf> {
-    let path = devices_file.parse::<PathBuf>()?;
-    match path.is_file() {
-        true => {
-            let devices = get_devices(&path)?;
-            if !devices.is_empty() {
-                Ok(devices_file.parse::<PathBuf>()?)
-            } else {
-                eprintln!("Devices file is empty");
-                std::process::exit(exitcode::NOINPUT);
-            }
-        }
-        false => {
-            eprintln!("device file argument is not a file");
-            std::process::exit(2);
-        }
-    }
-}
-
-fn get_devices(devices_file: &PathBuf) -> anyhow::Result<Vec<Device>> {
-    let file_contents = std::fs::read_to_string(devices_file)?;
-    Ok(serde_json::from_str::<Vec<Device>>(&file_contents)?)
+fn filter_unavailable_devices(available_devices: &mut Vec<Device>, devices: &[Device]) {
+    *available_devices = available_devices
+        .iter()
+        .filter(|d| {
+            devices
+                .iter()
+                .map(|o| o.sink_name.clone())
+                .any(|s| d.sink_name.contains(&s))
+        })
+        .map(|d| d.to_owned())
+        .collect::<Vec<_>>();
 }
