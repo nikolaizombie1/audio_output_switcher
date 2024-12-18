@@ -6,6 +6,8 @@ audio_output_switcher is a command line application used to quickly cycle throug
 This application is intended to be an audio server agnostic way to cycle through your audio outputs, view the currently active audio output and even customize which audio
 outputs will be cycled.
 
+*Note: Pipewire needs the pactl package to be installed. This can be done by installing the pipewire-pulse package.*
+
 ## Usage examples
 ```bash
 audio_output_switcher --view
