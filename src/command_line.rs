@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[clap(group(
     ArgGroup::new("funcs")
 	.required(true)
-	.args(&["change","view"])
+	.args(&["change","view", "list"])
 ))]
 pub struct Cli {
     /// Change current sink to the next available one.
