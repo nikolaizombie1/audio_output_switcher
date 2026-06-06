@@ -97,6 +97,15 @@ fn main() -> anyhow::Result<()> {
                 }
                 _ => filter_unavailable_devices(&mut available_devices, &config),
             }
+
+            for device in &mut available_devices {
+                for overide_device in &config {
+                    if device.sink_name.contains(&overide_device.sink_name) {
+                        device.device_name = overide_device.device_name.clone();
+                    }
+                }
+            }
+
         }
     }
 
