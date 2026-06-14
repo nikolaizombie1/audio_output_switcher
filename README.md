@@ -46,3 +46,9 @@ You can also choose which audio output devices will be cycled through by adding 
   }
 ]
 ```
+
+### Building And Installing From Source
+This project uses meson, with this command you can build and install with the following command:
+```
+meson setup builddir --prefix=/usr && meson compile -C builddir && sudo meson install -C builddir
+```
